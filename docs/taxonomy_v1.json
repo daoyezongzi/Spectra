@@ -1,0 +1,46 @@
+{
+  "taxonomy_version": "taxonomy_v1",
+  "genres": [
+    {
+      "name": "Electronic",
+      "keywords": ["electronic", "电子", "edm", "house", "techno", "synthwave", "trance", "future bass"]
+    },
+    {
+      "name": "R&B",
+      "keywords": ["r&b", "rnb", "节奏布鲁斯", "灵魂乐", "neo soul"]
+    },
+    {
+      "name": "Classical",
+      "keywords": ["classical", "古典", "交响乐", "弦乐", "钢琴", "管弦"]
+    },
+    {
+      "name": "City Pop",
+      "keywords": ["city pop", "citypop", "日系复古", "都会流行", "昭和"]
+    },
+    {
+      "name": "Rock",
+      "keywords": ["rock", "摇滚", "alt rock", "朋克", "金属", "吉他"]
+    },
+    {
+      "name": "Hip-Hop",
+      "keywords": ["hip-hop", "hiphop", "说唱", "rap", "boombap", "trap"]
+    },
+    {
+      "name": "Jazz",
+      "keywords": ["jazz", "爵士", "swing", "bebop", "萨克斯"]
+    },
+    {
+      "name": "Folk",
+      "keywords": ["folk", "民谣", "acoustic", "木吉他", "吟唱"]
+    },
+    {
+      "name": "Ambient",
+      "keywords": ["ambient", "氛围", "冥想", "白噪音", "助眠", "纯音乐"]
+    },
+    {
+      "name": "Pop",
+      "keywords": ["pop", "流行", "j-pop", "k-pop", "主流"]
+    }
+  ]
+}
+

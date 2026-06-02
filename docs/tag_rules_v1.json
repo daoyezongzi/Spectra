@@ -1,0 +1,57 @@
+{
+  "rule_version": "tag_rules_v1",
+  "genre_alias": {
+    "Pop": ["pop", "流行", "j-pop", "k-pop", "主流", "华语流行", "欧美流行"],
+    "Rock": ["rock", "摇滚", "后摇", "朋克", "金属", "英伦", "吉他", "live"],
+    "Electronic": ["electronic", "电子", "edm", "house", "techno", "trance", "synthwave", "future bass", "舞曲"],
+    "R&B": ["r&b", "rnb", "soul", "蓝调节奏", "灵魂乐", "neo soul"],
+    "Hip-Hop": ["hip-hop", "hiphop", "rap", "说唱", "trap", "boombap"],
+    "Classical": ["classical", "古典", "交响", "室内乐", "钢琴", "管弦", "弦乐"],
+    "Jazz": ["jazz", "爵士", "swing", "bebop", "萨克斯"],
+    "Folk": ["folk", "民谣", "acoustic", "木吉他", "吟唱"],
+    "Ambient": ["ambient", "氛围", "冥想", "助眠", "白噪音", "纯音乐", "lofi", "chill"],
+    "City Pop": ["city pop", "citypop", "都市流行", "昭和", "日系复古"]
+  },
+  "dimensions": {
+    "language": {
+      "华语": ["华语", "国语", "中文", "国风", "mandopop", "c-pop", "chinese"],
+      "粤语": ["粤语", "cantopop"],
+      "欧美": ["欧美", "英语", "western", "britpop", "english"],
+      "日语": ["日语", "j-pop", "jrock", "日系", "japanese"],
+      "韩语": ["韩语", "k-pop", "khiphop", "korean"],
+      "小语种": ["小语种", "法语", "西语", "拉丁", "德语", "俄语", "泰语"]
+    },
+    "mood": {
+      "抒情": ["抒情", "ballad", "伤感", "感动", "思念", "lyrical", "melancholy"],
+      "安静": ["安静", "平静", "放松", "治愈", "温柔", "白噪音", "助眠", "lofi", "chill", "calm"],
+      "高能": ["动感", "兴奋", "热血", "燃", "蹦迪", "节奏", "运动", "dance", "energetic", "high energy", "workout"],
+      "快乐": ["快乐", "轻快", "阳光", "清新", "happy"]
+    },
+    "scene": {
+      "夜晚": ["夜晚", "深夜", "晚间", "夜跑", "night"],
+      "学习": ["学习", "工作", "自习", "专注", "study", "focus"],
+      "旅行": ["旅行", "散步", "公路", "车载", "travel", "roadtrip"],
+      "派对": ["派对", "酒吧", "club", "舞池", "party"]
+    },
+    "theme": {
+      "影视": ["影视", "ost", "原声", "电影", "电视剧"],
+      "ACG": ["acg", "动漫", "二次元", "游戏"],
+      "怀旧": ["怀旧", "经典", "老歌", "复古"],
+      "器乐": ["器乐", "钢琴", "吉他", "纯音乐"]
+    }
+  },
+  "subgenre_rules": [
+    {"name": "华语流行", "if_genre": "Pop", "if_language": "华语"},
+    {"name": "粤语流行", "if_genre": "Pop", "if_language": "粤语"},
+    {"name": "J-Pop", "if_genre": "Pop", "if_language": "日语"},
+    {"name": "K-Pop", "if_genre": "Pop", "if_language": "韩语"},
+    {"name": "流行抒情", "if_genre": "Pop", "if_mood": "抒情"},
+    {"name": "安静流行", "if_genre": "Pop", "if_mood": "安静"},
+    {"name": "舞曲流行", "if_genre": "Pop", "any_tags": ["舞曲", "dance", "edm", "electronic", "蹦迪"]},
+    {"name": "流行摇滚", "if_genre": "Pop", "any_tags": ["摇滚", "rock", "吉他", "live"]},
+    {"name": "热血摇滚", "if_genre": "Rock", "if_mood": "高能"},
+    {"name": "后摇", "if_genre": "Rock", "any_tags": ["后摇", "post rock"]},
+    {"name": "氛围电子", "if_genre": "Electronic", "if_mood": "安静"},
+    {"name": "舞池电子", "if_genre": "Electronic", "if_mood": "高能"}
+  ]
+}

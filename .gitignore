@@ -1,0 +1,18 @@
+# Local planning notes
+grill.txt
+
+# Runtime state
+data/processed.json
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Node / Frontend
+node_modules/
+dist/
+
