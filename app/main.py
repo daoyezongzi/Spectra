@@ -13,6 +13,12 @@ import pandas as pd
 import requests
 import streamlit as st
 
+from spectra_v1.config import (
+    DEFAULT_NETEASE_API_BASE_URL,
+    DEFAULT_NETEASE_API_PORT,
+    SpectraConfig,
+    load_config,
+)
 from spectra_v1.netease_api import NeteaseApiClient
 from spectra_v1.normalization import GenreNormalizer
 from spectra_v1.store import ProcessedStore
@@ -23,11 +29,12 @@ TAXONOMY_PATH = ROOT / "docs" / "taxonomy_v1.json"
 TAG_RULES_PATH = ROOT / "docs" / "tag_rules_v1.json"
 PROCESSED_PATH = ROOT / "data" / "processed.json"
 ENV_PATH = ROOT / ".env"
-DEFAULT_NETEASE_API_BASE_URL = "http://127.0.0.1:3000"
 DEFAULT_LOW_CONFIDENCE_THRESHOLD = 0.65
 DEFAULT_EXTRACT_SLEEP_MS = 150
 DEFAULT_EXTRACT_BATCH_SIZE = 20
 RAW_TAG_LIMIT = 60
+LOGIN_ENV_KEYS = {"NETEASE_COOKIE", "NETEASE_UID"}
+OBSOLETE_ENV_KEYS = {"SPECTRA_SOURCE_MODE", "SPECTRA_AUTO_SAVE_LOGIN", "NETEASE_API_BASE_URL"}
 
 SINGLE_PLAYLIST_GROUPS: list[tuple[str, str]] = [
     ("raw_tags", "原始标签"),
@@ -116,27 +123,25 @@ def load_dotenv_file(env_path: Path) -> None:
             value = value.strip()
             if not key:
                 continue
+            if key not in LOGIN_ENV_KEYS:
+                continue
             if value and value[0] == value[-1] and value[0] in {'"', "'"}:
                 value = value[1:-1]
             os.environ.setdefault(key, value)
 
 
-def parse_bool_env(raw: str, default: bool = False) -> bool:
-    text = (raw or "").strip().lower()
-    if text in {"1", "true", "yes", "y", "on"}:
-        return True
-    if text in {"0", "false", "no", "n", "off"}:
-        return False
-    return default
-
-
-def upsert_env_values(env_path: Path, updates: dict[str, str]) -> None:
+def upsert_env_values(
+    env_path: Path,
+    updates: dict[str, str],
+    remove_keys: set[str] | None = None,
+) -> None:
     env_path.parent.mkdir(parents=True, exist_ok=True)
     if env_path.exists():
         lines = env_path.read_text(encoding="utf-8").splitlines()
     else:
         lines = []
 
+    remove_keys = remove_keys or set()
     pending = {key: value for key, value in updates.items()}
     result: list[str] = []
     for line in lines:
@@ -146,6 +151,8 @@ def upsert_env_values(env_path: Path, updates: dict[str, str]) -> None:
             continue
         key, _ = line.split("=", maxsplit=1)
         key = key.strip()
+        if key in remove_keys:
+            continue
         if key in pending:
             result.append(f"{key}={pending.pop(key)}")
         else:
@@ -180,7 +187,12 @@ def sanitize_error_message(exc: Exception | str) -> str:
 def is_local_api_url(base_url: str) -> bool:
     parsed = urlparse(base_url.strip())
     host = parsed.hostname or ""
-    return host in {"127.0.0.1", "localhost"} and parsed.port in {None, 3000}
+    return host in {"127.0.0.1", "localhost"}
+
+
+def get_api_port(base_url: str) -> int:
+    parsed = urlparse(base_url.strip())
+    return int(parsed.port or DEFAULT_NETEASE_API_PORT)
 
 
 def check_api_health(base_url: str, timeout_seconds: int = 3) -> tuple[bool, str]:
@@ -198,15 +210,17 @@ def check_api_health(base_url: str, timeout_seconds: int = 3) -> tuple[bool, str
     return True, "ok"
 
 
-def start_local_api_process() -> None:
+def start_local_api_process(base_url: str) -> None:
     detached = getattr(subprocess, "DETACHED_PROCESS", 0)
     new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     flags = detached | new_group | no_window
+    env = os.environ.copy()
+    env["PORT"] = str(get_api_port(base_url))
     subprocess.Popen(
-        "npx.cmd --yes NeteaseCloudMusicApi",
+        ["cmd.exe", "/c", "npx.cmd --yes NeteaseCloudMusicApi"],
         cwd=str(ROOT),
-        shell=True,
+        env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         creationflags=flags,
@@ -215,13 +229,18 @@ def start_local_api_process() -> None:
 
 def try_recover_local_api(base_url: str) -> tuple[bool, str]:
     if not is_local_api_url(base_url):
-        return False, "当前 API 不是 localhost:3000，跳过自动拉起。"
+        return False, "当前 API 不是本机地址，跳过自动拉起。"
     try:
-        start_local_api_process()
-        time.sleep(1.5)
-        ok, message = check_api_health(base_url)
+        ok, message = check_api_health(base_url, timeout_seconds=2)
         if ok:
-            return True, "本地 API 自动拉起成功。"
+            return True, "本地 API 已可用。"
+
+        start_local_api_process(base_url)
+        for _ in range(12):
+            time.sleep(1)
+            ok, message = check_api_health(base_url, timeout_seconds=2)
+            if ok:
+                return True, "本地 API 自动拉起成功。"
         return False, f"本地 API 拉起后仍不可用: {message}"
     except Exception as exc:
         return False, sanitize_error_message(exc)
@@ -279,6 +298,11 @@ def get_raw_tag_values(raw_tags_text: object) -> list[str]:
         if label and label not in values:
             values.append(label)
     return values
+
+
+def count_raw_tag_matches(raw_tags_text: object, selected_values: list[str]) -> int:
+    raw_tag_set = set(get_raw_tag_values(raw_tags_text))
+    return sum(1 for value in selected_values if value in raw_tag_set)
 
 
 def init_extract_task(source_df: pd.DataFrame) -> None:
@@ -409,13 +433,20 @@ def apply_single_playlist_tag_filters(source_df: pd.DataFrame) -> pd.DataFrame:
         if not selected_values:
             continue
         if column == "raw_tags":
-            filtered = filtered[
-                filtered["raw_tags"].apply(
-                    lambda text: any(tag in get_raw_tag_values(text) for tag in selected_values)
-                )
-            ]
+            min_match = 2 if len(selected_values) >= 3 else 1
+            filtered["__raw_tag_match_count"] = filtered["raw_tags"].apply(
+                lambda text: count_raw_tag_matches(text, selected_values)
+            )
+            filtered = filtered[filtered["__raw_tag_match_count"] >= min_match]
         else:
             filtered = filtered[filtered[column].fillna("").isin(selected_values)]
+    if "__raw_tag_match_count" in filtered.columns:
+        filtered = filtered.sort_values(
+            by=["__raw_tag_match_count", "song_name"],
+            ascending=[False, True],
+            kind="stable",
+        )
+        filtered = filtered.drop(columns=["__raw_tag_match_count"])
     return filtered.reset_index(drop=True)
 
 
@@ -515,9 +546,7 @@ def build_tag_wall_source(review_df: pd.DataFrame) -> pd.DataFrame:
     if review_df.empty:
         return review_df.copy()
     source_df = coerce_review_dataframe(review_df)
-    filtered = source_df[
-        (~source_df["needs_review"]) & (source_df["final_genre"].fillna("") != "Other")
-    ].copy()
+    filtered = source_df[source_df["final_genre"].fillna("") != "Other"].copy()
     return filtered.reset_index(drop=True)
 
 
@@ -577,19 +606,22 @@ def process_extract_batch(client: NeteaseApiClient) -> None:
         try:
             evidence = client.fetch_song_evidence(song_id, st.session_state["cookie"])
         except Exception as exc:
-            if not st.session_state["api_autorestart_done"]:
-                st.session_state["api_autorestart_done"] = True
-                recovered, message = try_recover_local_api(client.base_url)
-                if recovered:
+            recovered, message = try_recover_local_api(client.base_url)
+            if recovered:
+                st.session_state["api_health_ok"] = True
+                st.session_state["api_health_message"] = message
+                try:
                     evidence = client.fetch_song_evidence(song_id, st.session_state["cookie"])
-                else:
-                    st.session_state["extract_last_error"] = f"{message} 原始错误: {sanitize_error_message(exc)}"
+                except Exception as retry_exc:
+                    st.session_state["extract_last_error"] = sanitize_error_message(retry_exc)
                     st.session_state["extract_running"] = False
                     st.session_state["extract_paused"] = True
                     refresh_extracted_df_from_state()
                     return
             else:
-                st.session_state["extract_last_error"] = sanitize_error_message(exc)
+                st.session_state["api_health_ok"] = False
+                st.session_state["api_health_message"] = message
+                st.session_state["extract_last_error"] = f"{message} 原始错误: {sanitize_error_message(exc)}"
                 st.session_state["extract_running"] = False
                 st.session_state["extract_paused"] = True
                 refresh_extracted_df_from_state()
@@ -629,17 +661,17 @@ def process_extract_batch(client: NeteaseApiClient) -> None:
     refresh_extracted_df_from_state()
 
 
-def render_sidebar(base_url_default: str) -> str:
+def render_sidebar(config: SpectraConfig) -> tuple[str, bool]:
     with st.sidebar:
         st.header("运行配置")
         base_url = st.text_input(
             "网易云 API Base URL",
-            value=os.environ.get("NETEASE_API_BASE_URL", base_url_default),
+            value=config.netease_api_base_url,
             key="sidebar_api_base_url",
-        ).strip() or base_url_default
+        ).strip() or config.netease_api_base_url
         auto_save_login = st.checkbox(
             "登录后自动写回 .env",
-            value=parse_bool_env(os.environ.get("SPECTRA_AUTO_SAVE_LOGIN", "true"), True),
+            value=config.auto_save_login,
             key="sidebar_auto_save_login",
         )
 
@@ -650,7 +682,7 @@ def render_sidebar(base_url_default: str) -> str:
             st.session_state["api_health_message"] = message
         if health_right.button("启动本地 API", key="sidebar_start_api", use_container_width=True):
             try:
-                start_local_api_process()
+                start_local_api_process(base_url)
                 st.session_state["api_health_ok"] = None
                 st.session_state["api_health_message"] = "已尝试启动本地 NeteaseCloudMusicApi。"
             except Exception as exc:
@@ -668,15 +700,14 @@ def render_sidebar(base_url_default: str) -> str:
             st.session_state.clear()
             st.rerun()
 
-    os.environ["SPECTRA_AUTO_SAVE_LOGIN"] = "true" if auto_save_login else "false"
-    os.environ["NETEASE_API_BASE_URL"] = base_url
-    return base_url
+    return base_url, auto_save_login
 
 
 def main() -> None:
     st.set_page_config(page_title="Spectra", layout="wide")
     load_dotenv_file(ENV_PATH)
     init_state()
+    app_config = load_config()
 
     if not st.session_state["env_cookie_loaded"]:
         env_cookie = os.environ.get("NETEASE_COOKIE", "").strip()
@@ -689,7 +720,7 @@ def main() -> None:
 
     normalizer = GenreNormalizer(TAXONOMY_PATH, TAG_RULES_PATH)
     store = ProcessedStore(PROCESSED_PATH)
-    base_url = render_sidebar(DEFAULT_NETEASE_API_BASE_URL)
+    base_url, auto_save_login = render_sidebar(app_config)
     client = get_client(base_url)
     if st.session_state["uid"]:
         client.set_uid(st.session_state["uid"])
@@ -724,16 +755,14 @@ def main() -> None:
                         st.session_state["cookie"] = cookie
                         st.session_state["uid"] = uid
                         client.set_uid(uid)
-                        if parse_bool_env(os.environ.get("SPECTRA_AUTO_SAVE_LOGIN", "true"), True):
+                        if auto_save_login:
                             upsert_env_values(
                                 ENV_PATH,
                                 {
-                                    "SPECTRA_SOURCE_MODE": "real",
-                                    "SPECTRA_AUTO_SAVE_LOGIN": os.environ.get("SPECTRA_AUTO_SAVE_LOGIN", "true"),
-                                    "NETEASE_API_BASE_URL": base_url,
                                     "NETEASE_COOKIE": cookie,
                                     "NETEASE_UID": uid,
                                 },
+                                remove_keys=OBSOLETE_ENV_KEYS,
                             )
                         st.success(message)
                     elif status == "wait_scan":
@@ -885,9 +914,9 @@ def main() -> None:
             clean_df = build_tag_wall_source(normalized_df)
             summary_cols = st.columns(4)
             summary_cols[0].metric("归一化歌曲数", len(normalized_df))
-            summary_cols[1].metric("待复核", int(normalized_df["needs_review"].sum()))
-            summary_cols[2].metric("可进入标签墙", len(clean_df))
-            summary_cols[3].metric("taxonomy_version", normalizer.taxonomy_version)
+            summary_cols[1].metric("待确认", int(normalized_df["needs_review"].sum()))
+            summary_cols[2].metric("可直接选歌", len(clean_df))
+            summary_cols[3].metric("主类目数", normalized_df["final_genre"].nunique())
 
             genre_summary = (
                 normalized_df["final_genre"]
@@ -899,10 +928,10 @@ def main() -> None:
             )
             st.dataframe(genre_summary, use_container_width=True, hide_index=True)
 
-    st.subheader("5) 人工复核")
+    st.subheader("5) 可选：人工微调")
     review_df = coerce_review_dataframe(st.session_state["review_df"])
     if review_df.empty:
-        st.info("先执行归一化，再来这里检查结果。")
+        st.info("先执行归一化。通常你可以直接去下一步选歌。")
     else:
         language_options = list(normalizer.dimension_alias_map.get("language", {}).keys()) + ["Unknown"]
         mood_options = list(normalizer.dimension_alias_map.get("mood", {}).keys()) + ["Unknown"]
@@ -913,77 +942,67 @@ def main() -> None:
         review_summary = st.columns([0.22, 0.22, 0.22, 0.34])
         needs_review_count = int(review_df["needs_review"].sum())
         review_summary[0].metric("总结果", len(review_df))
-        review_summary[1].metric("待处理", needs_review_count)
-        review_summary[2].metric("已可用", len(review_df) - needs_review_count)
+        review_summary[1].metric("待确认", needs_review_count)
+        review_summary[2].metric("可直接选歌", len(review_df[review_df["final_genre"].fillna("") != "Other"]))
         review_summary[3].markdown(
-            "**这一步怎么做**\n\n"
-            "看机器分得对不对。对的保留；不对的直接改类目、语种、情绪等；\n"
-            "暂时不想放进标签墙的，勾上“待复核”。"
+            "**这一步可以跳过**\n\n"
+            "如果分类看起来差不多，直接去下一步选歌。\n"
+            "只有当分类明显不对时，再展开下面这张表修改。"
         )
 
-        show_all_review_rows = st.checkbox(
-            "显示全部结果",
-            value=False,
-            key="review_show_all_rows",
-            help="默认只看需要处理的歌曲。勾上后显示全部归一化结果。",
-        )
-        review_editor_source = review_df if show_all_review_rows else review_df[review_df["needs_review"]].reset_index(drop=True)
-        if review_editor_source.empty:
-            st.success("当前没有待处理歌曲，可以直接进入下一步选歌。")
-            review_editor_source = review_df
-
-        edited_review_df = st.data_editor(
-            review_editor_source,
-            use_container_width=True,
-            hide_index=True,
-            key="review_editor",
-            column_config={
-                "song_id": st.column_config.TextColumn("song_id", disabled=True),
-                "song_name": st.column_config.TextColumn("歌曲", disabled=True),
-                "artist": st.column_config.TextColumn("歌手", disabled=True),
-                "wiki_style": st.column_config.TextColumn("Wiki 风格", disabled=True),
-                "raw_tags": st.column_config.TextColumn("原始标签", disabled=True, width="large"),
-                "final_genre": st.column_config.SelectboxColumn("一级类目", options=genre_options),
-                "final_subgenre": st.column_config.TextColumn("二级类目"),
-                "language": st.column_config.SelectboxColumn("语种", options=language_options),
-                "mood": st.column_config.SelectboxColumn("情绪", options=mood_options),
-                "scene": st.column_config.SelectboxColumn("场景", options=scene_options),
-                "theme": st.column_config.SelectboxColumn("主题", options=theme_options),
-                "confidence": st.column_config.NumberColumn("置信度", format="%.2f", disabled=True),
-                "decision_source": st.column_config.TextColumn("决策来源", disabled=True),
-                "reason": st.column_config.TextColumn("理由", disabled=True, width="large"),
-                "needs_review": st.column_config.CheckboxColumn("待复核"),
-                "review_note": st.column_config.TextColumn("复核备注", width="medium"),
-            },
-            disabled=["song_id", "song_name", "artist", "wiki_style", "raw_tags", "confidence", "decision_source", "reason"],
-        )
-        edited_review_df = coerce_review_dataframe(edited_review_df)
-        if show_all_review_rows:
-            st.session_state["review_df"] = edited_review_df
-        else:
-            merged_review_df = review_df.copy()
-            edited_rows_by_song_id = {
-                int(row["song_id"]): row for row in edited_review_df.to_dict("records")
-            }
-            for index, row in merged_review_df.iterrows():
-                song_id = int(row["song_id"])
-                if song_id in edited_rows_by_song_id:
-                    for column in REVIEW_COLUMNS:
-                        merged_review_df.at[index, column] = edited_rows_by_song_id[song_id][column]
-            st.session_state["review_df"] = coerce_review_dataframe(merged_review_df)
-
-        if st.button("保存人工复核结果", key="save_review_df"):
-            st.success("复核结果已保存。确认无误后，直接去下一步选歌。")
+        with st.expander("打开人工微调表", expanded=False):
+            st.caption("这里的修改会自动用于下一步选歌。")
+            edited_review_df = st.data_editor(
+                review_df[
+                    [
+                        "song_id",
+                        "song_name",
+                        "artist",
+                        "raw_tags",
+                        "final_genre",
+                        "final_subgenre",
+                        "language",
+                        "mood",
+                        "scene",
+                        "theme",
+                        "needs_review",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+                key="review_editor",
+                column_config={
+                    "song_id": st.column_config.TextColumn("song_id", disabled=True),
+                    "song_name": st.column_config.TextColumn("歌曲", disabled=True),
+                    "artist": st.column_config.TextColumn("歌手", disabled=True),
+                    "raw_tags": st.column_config.TextColumn("原始标签", disabled=True, width="large"),
+                    "final_genre": st.column_config.SelectboxColumn("一级类目", options=genre_options),
+                    "final_subgenre": st.column_config.TextColumn("二级类目"),
+                    "language": st.column_config.SelectboxColumn("语种", options=language_options),
+                    "mood": st.column_config.SelectboxColumn("情绪", options=mood_options),
+                    "scene": st.column_config.SelectboxColumn("场景", options=scene_options),
+                    "theme": st.column_config.SelectboxColumn("主题", options=theme_options),
+                    "needs_review": st.column_config.CheckboxColumn("暂不参与选歌"),
+                },
+                disabled=["song_id", "song_name", "artist", "raw_tags"],
+            )
+            edited_review_df = edited_review_df.copy()
+            edited_review_df["wiki_style"] = review_df["wiki_style"].values
+            edited_review_df["confidence"] = review_df["confidence"].values
+            edited_review_df["decision_source"] = review_df["decision_source"].values
+            edited_review_df["reason"] = review_df["reason"].values
+            edited_review_df["review_note"] = review_df["review_note"].values
+            st.session_state["review_df"] = coerce_review_dataframe(edited_review_df[REVIEW_COLUMNS])
 
     st.subheader("6) 单歌单标签分发")
     review_df = coerce_review_dataframe(st.session_state["review_df"])
     tag_wall_source_df = build_tag_wall_source(review_df)
     if review_df.empty:
-        st.info("先完成归一化和人工复核，再使用标签墙选歌。")
+        st.info("先完成归一化，再使用标签墙选歌。")
     else:
         st.caption("同一块里可以多选；不同块会一起生效。")
         if tag_wall_source_df.empty:
-            st.warning("当前还没有可选歌曲。先回到上一步把待复核内容处理掉。")
+            st.warning("当前还没有可选歌曲。")
         else:
             ensure_single_playlist_filter_state(tag_wall_source_df)
             st.text_input(
@@ -1008,6 +1027,9 @@ def main() -> None:
                 render_single_playlist_tag_group("原始标签", "raw_tags", tag_options["raw_tags"])
             for column, label in SINGLE_PLAYLIST_GROUPS[1:]:
                 render_single_playlist_tag_group(label, column, tag_options[column])
+
+            if len(st.session_state[single_playlist_filter_key("raw_tags")]) >= 3:
+                st.caption("已选 3 个及以上原始标签，系统会自动收紧匹配；结果出来后仍可在表格里手动取消歌曲。")
 
             filtered_song_df = apply_single_playlist_tag_filters(tag_wall_source_df)
             if selected_filter_count() == 0:

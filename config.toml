@@ -1,0 +1,3 @@
+[spectra]
+netease_api_base_url = "http://127.0.0.1:18631"
+auto_save_login = true
